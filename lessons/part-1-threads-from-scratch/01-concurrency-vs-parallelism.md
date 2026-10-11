@@ -324,4 +324,54 @@ They share the heap: every object and every static field. Each thread has its ow
 - Threads help I/O-bound work by overlapping the waits, and CPU-bound work only up to the core count.
 - The scheduler decides the order threads run in. Never rely on it.
 
+---
+
+## Questions & answers: threads, cores and joins
+
+### How `join()` works — who waits and who "joins back"
+
+`chop.join()` is called **on** the chop thread but **executed by** whichever thread is running that line — in `ConcurrentKitchen`, that's the `main` thread. `main` blocks until `chop` terminates, then resumes ("joins back" into the execution flow). The `chop` thread itself never waits — it runs independently.
+
+The order of `join()` calls doesn't dictate execution order. All three threads started on lines 12-14 run concurrently; by the time `chop.join()` returns (~600 ms), `plate` (~400 ms) has likely already finished, so its `join()` returns immediately. Total ≈ longest task (800 ms), not the sum.
+
+### Shared heap vs private stack
+
+- **Heap**: shared by all threads — every object and every static field lives here.
+- **Stack**: private per thread — holds local variables and the method call chain.
+- A **shared object**: two threads hold references to the *same* instance on the heap and mutate its fields → visible to both, and dangerous (race conditions).
+- A **static field**: one copy per class, stored on the heap → every thread sees it.
+- A **local variable**: lives on one thread's stack → no other thread can touch it. Safe.
+
+None of the three lesson examples (SequentialKitchen, ConcurrentKitchen, CpuBound) demonstrate shared state. Each thread works with its own locals/parameters. The shared-state danger is deferred to Part 2 (see line 85).
+
+### More threads than cores
+
+Creating 12 threads on an 8-core machine is legal. A thread is a software construct (stack + scheduler entry), not a core. At any instant, only 8 execute; the other 4 are paused, waiting for a free core. The OS scheduler **time-slices**: gives each thread a short slice, then swaps another in.
+
+For **CPU-bound** work, going past the core count gains nothing — you do the same total work plus pay context-switch overhead. That's why a 12-thread parallel run barely beats a 4-job sequential run, and the comparison is unfair anyway (4 jobs vs 12). For **I/O-bound** work, threads spend most time waiting (sleep, HTTP, DB), so many more threads than cores are useful — the waiting ones consume no CPU.
+
+### Context switching — what if a thread doesn't finish in its slice?
+
+The thread is **paused mid-execution**. Its state (registers, stack pointer, program counter) is saved. Another thread is loaded in its place. When the first thread gets its next slice, it **resumes exactly where it left off** — from its perspective, it ran straight through. `countPrimes(2_000_000)` may be paused and resumed many times across many slices.
+
+Cost: save/restore takes time, and the CPU cache may now hold the other thread's data, so the resumed thread runs slower until its own data is back in cache.
+
+### "A few thousand platform threads is fine. A million is not"
+
+Each platform thread (`new Thread(...)`) is backed by an OS thread and carries ~1 MB stack by default. 1,000 threads ≈ 1 GB — fine. 1,000,000 threads ≈ 1 TB — your machine can't do it; it'll crash or thrash. This is the motivation for **virtual threads** (Lesson 21): lightweight, not 1:1 with OS threads, share a small pool of carrier threads. You can have millions because they park/unpark on the heap instead of each holding a dedicated OS stack.
+
+### "How many platform threads do I have?"
+
+There's no fixed pool and no pre-allocated count. You **create** platform threads on demand with `new Thread(...)`. The only hardware number you can query is `Runtime.getRuntime().availableProcessors()` → 8 on your machine. That tells you how many can run **at the same instant** (max parallelism). Platform threads are limited by **memory**, not cores. You can create as many as memory allows; the scheduler time-slices them across your cores regardless of count.
+
+### One mental model tying it together
+
+- **Cores** = fixed hardware, determines max simultaneous execution.
+- **Platform threads** = software you create, limited by memory, scheduled across cores via time-slicing.
+- **Heap** = shared, the source of both communication and danger between threads.
+- **Stack** = private, always safe.
+- **join()** = the calling thread waits; the target thread just runs and finishes.
+
+---
+
 **Next: [Lesson 02, Your first thread](02-your-first-thread.md)**
